@@ -1,0 +1,1383 @@
+#include <linux/device.h>   /* class_createt头文件*/
+
+#include <linux/init.h>
+
+#include <linux/delay.h>
+
+#include <linux/export.h>
+
+#include <linux/module.h>
+
+#include <linux/moduleparam.h>
+
+#include <linux/errno.h>
+
+#include <linux/miscdevice.h>
+
+#include <linux/types.h>
+
+#include <linux/io.h>
+
+#include <linux/fs.h>  
+
+#include <linux/gpio.h> 
+
+#include <asm/gpio.h>
+
+#include <asm/uaccess.h>
+
+#include <mach/hardware.h>
+
+#include <mach/board-am335xevm.h>
+
+#include <linux/interrupt.h>
+
+
+
+typedef unsigned int uint16 ;
+
+typedef unsigned char uint8 ;
+
+
+
+static struct class *spi_class;
+
+static struct class_device *spi_class_dev;
+
+extern void delay(unsigned int msec);
+
+/**************************引脚相关的宏定义**********************/
+
+#define GPIO_TO_PIN(bank,gpio)   ((32*(bank))+(gpio))
+
+#define CSN      GPIO_TO_PIN(3,17)             
+
+#define MOSI     GPIO_TO_PIN(3,16)                         
+
+#define IRQ      GPIO_TO_PIN(1,16)                         
+
+#define MISO     GPIO_TO_PIN(3,15)                         
+
+#define SCK      GPIO_TO_PIN(3,14)                         
+
+#define CE       GPIO_TO_PIN(1,17)                         
+
+
+
+
+
+
+
+/****************************NRF24L01寄存器指令****************************/
+
+
+
+#define READ_REG       0x00 // 读寄存器指令
+
+
+
+#define WRITE_REG      0x20 // 写寄存器指令
+
+
+
+#define RD_RX_PLOAD    0x61 // 读取接收数据指令
+
+
+
+#define WR_TX_PLOAD    0xA0 // 写待发数据指令
+
+
+
+#define FLUSH_TX       0xE1 // 冲洗发送 FIFO指令
+
+
+
+#define FLUSH_RX       0xE2 // 冲洗接收 FIFO指令
+
+
+
+#define REUSE_TX_PL    0xE3 // 定义重复装载数据指令
+
+
+
+#define NOP 0xFF // 保留
+
+
+
+
+
+/**************************SPI(nRF24L01)寄存器地址*************************/
+
+
+
+#define CONFIG         0x00 // 配置收发状态，CRC校验模式以及收发状态响应方式
+
+
+
+#define EN_AA          0x01 // 自动应答功能设置
+
+
+
+#define EN_RXADDR      0x02 // 可用信道设置
+
+
+
+#define SETUP_AW       0x03 // 收发地址宽度设置
+
+
+
+#define SETUP_RETR     0x04 // 自动重发功能设置
+
+
+
+#define RF_CH          0x05 // 工作频率设置
+
+
+
+#define RF_SETUP       0x06 // 发射速率、功耗功能设置
+
+
+
+#define STATUS         0x07 // 状态寄存器
+
+
+
+#define OBSERVE_TX     0x08 // 发送监测功能
+
+
+
+#define CD             0x09 // 地址检测 
+
+
+
+#define RX_ADDR_P0     0x0A // 频道0接收数据地址
+
+
+
+#define RX_ADDR_P1     0x0B // 频道1接收数据地址
+
+
+
+#define RX_ADDR_P2     0x0C // 频道2接收数据地址
+
+
+
+#define RX_ADDR_P3     0x0D // 频道3接收数据地址
+
+
+
+#define RX_ADDR_P4     0x0E // 频道4接收数据地址
+
+
+
+#define RX_ADDR_P5     0x0F // 频道5接收数据地址
+
+
+
+#define TX_ADDR        0x10 // 发送地址寄存器
+
+
+
+#define RX_PW_P0       0x11 // 接收频道0接收数据长度
+
+
+
+#define RX_PW_P1       0x12 // 接收频道0接收数据长度
+
+
+
+#define RX_PW_P2       0x13 // 接收频道0接收数据长度
+
+
+
+#define RX_PW_P3       0x14 // 接收频道0接收数据长度
+
+
+
+#define RX_PW_P4       0x15 // 接收频道0接收数据长度
+
+
+
+#define RX_PW_P5       0x16 // 接收频道0接收数据长度
+
+
+
+#define FIFO_STATUS    0x17 // FIFO栈入栈出状态寄存器设置
+
+
+
+
+
+
+
+//NRF24L01
+
+
+
+#define TX_ADR_WIDTH 5       // 5 uint8s TX address width
+
+
+
+#define RX_ADR_WIDTH 5       // 5 uint8s RX address width
+
+
+
+#define TX_PLOAD_WIDTH 32    // 20 uint8s TX payload
+
+
+
+#define RX_PLOAD_WIDTH 32    // 20 uint8s TX payload
+
+
+
+
+
+#define DEVICE_NAME "NRF24L01" //设备名称，在可以 /proc/devices 查看
+
+
+
+#define NRF24L01_MAJOR 241 //主设备号
+
+
+
+#define TxBufSize 32
+
+
+
+
+
+uint8 const TX_ADDRESS[TX_ADR_WIDTH]= {0x34,0x43,0x10,0x10,0x01}; //本地地址
+
+
+
+uint8 const RX_ADDRESS[RX_ADR_WIDTH]= {0x34,0x43,0x10,0x10,0x01}; //接收地址
+
+
+
+uint8 TxBuf[TxBufSize]={
+
+ 0x01,0x02,0x03,0x4,0x05,0x06,0x07,0x08,
+
+ 0x09,0x10,0x11,0x12,0x13,0x14,0x15,0x16,
+
+ 0x17,0x18,0x19,0x20,0x21,0x22,0x23,0x24,
+
+ 0x25,0x26,0x27,0x28,0x29,0x30,0x31,0x32,
+
+};
+
+
+
+uint8 RxBuf[32]={0};
+
+
+
+
+
+
+
+ 
+
+//Concrol  function  操作函数
+
+
+
+uint8 init_NRF24L01(void);
+
+
+
+uint8 SPI_RW(uint8 tmp);
+
+
+
+uint8 SPI_Read(uint8 reg);
+
+
+
+void SetRX_Mode(void);
+
+
+
+uint8 SPI_RW_Reg(uint8 reg, uint8 value);
+
+
+
+uint8 SPI_Read_Buf(uint8 reg, uint8 *pBuf, uint8 uchars);
+
+
+
+uint8 SPI_Write_Buf(uint8 reg, uint8 *pBuf, uint8 uchars);
+
+
+
+unsigned char nRF24L01_RxPacket(unsigned char* rx_buf);
+
+
+
+void nRF24L01_TxPacket(unsigned char * tx_buf);
+
+
+
+
+
+//全局变量
+
+
+
+uint8 opencount = 0;
+
+
+
+uint8 sta; //状态标志
+
+
+
+#define RX_DR 6
+
+#define TX_DS 5
+
+#define MAX_RT 4
+
+/*
+
+static volatile unsigned char gpio_irq_flag=0;
+
+
+//可以中断方式（选用）
+static irqreturn_t Handler(int irq,void *dev_id)
+
+{
+
+    int i;
+
+    printk("interrupt function!!!!\n");
+
+    gpio_set_value(CE, 0); //SPI使能
+
+    udelay(50);
+
+  
+
+    sta=SPI_Read(STATUS); // 读取状态寄存其来判断数据接收状况
+
+
+
+    if(sta & (1<<RX_DR)) // 判断是否接收到数据
+
+
+
+    {
+
+       
+
+        SPI_Read_Buf(RD_RX_PLOAD,RxBuf,TX_PLOAD_WIDTH);// read receive payload from RX_FIFO buffer
+
+
+
+        SPI_RW_Reg(WRITE_REG+STATUS,sta); //接收到数据后RX_DR,TX_DS,MAX_PT都置高为1，通过写1来清楚中断标志
+
+
+
+        gpio_irq_flag =1; //读取数据完成标志
+
+
+
+    }
+
+    
+
+    if(gpio_irq_flag)
+
+    {
+
+       for(i=0;i<32;i++)
+
+       printk("Buff%d=%d\n",i,RxBuf[i]);
+
+       printk("STATUS:%2x\n",SPI_Read(STATUS));//read status to see if its flag is cleared
+
+       gpio_irq_flag=0;
+
+    }
+
+    //memset(RxBuf,0,sizeof(RxBuf));
+
+    return IRQ_RETVAL(IRQ_HANDLED);
+
+} 
+
+
+
+*/
+
+//check	the nrf2401 exist or not!!!
+
+unsigned char  NRF24L01_Check(void)
+
+{
+
+	u8 buf[5]={0XA5,0XA5,0XA5,0XA5,0XA5};
+
+	u8 i;	 
+
+	SPI_Write_Buf(WRITE_REG+TX_ADDR,buf,5);	
+
+	SPI_Read_Buf(TX_ADDR,buf,5);  
+
+	for(i=0;i<5;i++)
+
+        {  
+
+           if(buf[i]!=0XA5)break;
+
+        }	 							   
+
+	if(i!=5)return 1;	
+
+	return 0;		 
+
+}
+
+
+
+//NRF24L01初始化
+
+
+
+uint8 init_NRF24L01(void)
+
+{
+
+    gpio_direction_output(CE, 1);
+
+    gpio_direction_output(CSN, 1);
+
+    gpio_direction_output(SCK, 1);
+
+    gpio_direction_output(MOSI,1);
+
+    gpio_direction_input(MISO);
+
+    gpio_direction_input(IRQ);
+
+
+
+    udelay(500);
+
+
+
+    gpio_set_value(CE, 0); // chip enable
+
+
+
+    ndelay(60);
+
+    gpio_set_value(CSN, 1); // Spi disable 
+
+
+
+    ndelay(60);
+
+    gpio_set_value(SCK, 0) ; // Spi clock line init high
+
+
+
+    ndelay(60);
+
+    if(NRF24L01_Check()) 
+
+    printk("NRF24L01 device is not Exist or Error\n");
+
+    else printk("NRF24L01 device is ok\n");
+
+
+
+    SPI_Write_Buf(WRITE_REG + TX_ADDR, TX_ADDRESS, TX_ADR_WIDTH); // 写发送端地址
+
+
+
+    SPI_Write_Buf(WRITE_REG + RX_ADDR_P0, RX_ADDRESS, RX_ADR_WIDTH); // 写接收端地址
+
+
+
+    SPI_RW_Reg(WRITE_REG + EN_AA, 0x01); // 频道0自动 ACK应答允许 
+
+
+
+    SPI_RW_Reg(WRITE_REG + EN_RXADDR, 0x01); // 允许接收地址只有频道0，如果需要多频道可以参考Page21 
+
+
+
+    SPI_RW_Reg(WRITE_REG + RF_CH, 5); // 设置信道工作为2.4GHZ，收发必须一致
+
+
+
+    SPI_RW_Reg(WRITE_REG + RX_PW_P0, RX_PLOAD_WIDTH); //设置接收数据长度，本次设置为32字节
+
+
+
+    SPI_RW_Reg(WRITE_REG + RF_SETUP, 0x09); //设置发射速率为1MHZ，发射功率为最大值0dB
+
+
+
+    SPI_RW_Reg(WRITE_REG + CONFIG, 0x0f); // IRQ收发完成中断响应，16位CRC ，主接收
+
+    printk("init_NRF24L01 ok \n");
+
+
+
+    mdelay(1000);
+
+
+
+    return (1);
+
+}
+
+
+
+
+
+//函数：uint8 SPI_RW(uint8 tmp)
+
+
+
+//功能：NRF24L01的SPI写时序tmp
+
+
+
+uint8 SPI_RW(uint8 tmp)
+
+{
+
+    uint8 bit_ctr;
+
+
+
+    for(bit_ctr=0 ;bit_ctr<8 ;bit_ctr++) // output 8-bit
+
+
+
+    {
+
+	 if(tmp & 0x80) // output 'tmp', MSB to MOSI
+
+
+
+		 gpio_set_value(MOSI, 1);
+
+	 else
+
+		 gpio_set_value(MOSI, 0);
+
+
+
+	 //ndelay(60);
+
+
+
+	 tmp <<= 1; // shift next bit into MSB..
+
+
+
+	 gpio_set_value(SCK, 1); // Set SCK high.....
+
+
+
+	 ndelay(60);
+
+
+
+         tmp |= gpio_get_value(MISO); // capture current MISO bit
+
+
+
+         gpio_set_value(SCK, 0) ; // ..then set SCK low again
+
+
+
+         ndelay(60);
+
+    }
+
+
+
+    return(tmp); // return read tmp 
+
+
+
+}
+
+
+
+ 
+
+
+
+
+
+//功能：NRF24L01的SPI读寄存器
+
+
+
+uint8 SPI_Read(uint8 reg)
+
+{
+
+    uint8 reg_val;
+
+
+
+     gpio_set_value(CSN, 0) ; // CSN low, initialize SPI communication...
+
+
+
+    ndelay(60);
+
+    SPI_RW(reg); // Select register to read from..
+
+
+
+    reg_val = SPI_RW(0); // ..then read registervalue
+
+
+
+    gpio_set_value(CSN, 1); // CSN high, terminate SPI communication
+
+
+
+    ndelay(60);
+
+    
+
+    return(reg_val); // return register value
+
+
+
+}
+
+
+
+ 
+
+
+
+//功能：NRF24L01写寄存器函数
+
+
+
+uint8 SPI_RW_Reg(uint8 reg, uint8 value)
+
+{
+
+    uint8 status; 
+
+
+
+     gpio_set_value(CSN, 0) ; // CSN low, init SPI transaction
+
+
+
+    ndelay(60);
+
+    status = SPI_RW(reg); // select register
+
+
+
+    SPI_RW(value); // ..and write value to it..
+
+
+
+    gpio_set_value(CSN, 1); // CSN high again
+
+
+
+    ndelay(60);
+
+    
+
+    return(status); // return nRF24L01 status uint8
+
+
+
+}
+
+
+
+ 
+
+
+
+//函数：uint8 SPI_Read_Buf(uint8 reg, uint8 *pBuf, uint8 uchars)
+
+
+
+//功能: 用于读数据，reg：为寄存器地址，pBuf：为待读出数据地址，uchars：读出数据的个数
+
+
+
+uint8 SPI_Read_Buf(uint8 reg, uint8 *pBuf, uint8 uchars)
+
+{
+
+    uint8 status,uint8_ctr;
+
+    
+
+     gpio_set_value(CSN, 0) ; // Set CSN low, init SPI tranaction
+
+
+
+    ndelay(60);
+
+    status = SPI_RW(reg); // Select register to write to and read status uint8
+
+
+
+    
+
+    for(uint8_ctr=0;uint8_ctr<uchars;uint8_ctr++)
+
+    {
+
+        pBuf[uint8_ctr] = SPI_RW(0); // 
+
+
+
+        ndelay(20);
+
+    }
+
+    
+
+    gpio_set_value(CSN, 1);
+
+    ndelay(60);
+
+    
+
+    return(status); // return nRF24L01 status uint8
+
+
+
+}
+
+
+
+
+
+//函数：uint8 SPI_Write_Buf(uint8 reg, uint8 *pBuf, uint8 uchars)
+
+
+
+//功能: 用于写数据：为寄存器地址，pBuf：为待写入数据地址，uchars：写入数据的个数
+
+
+
+uint8 SPI_Write_Buf(uint8 reg, uint8 *pBuf, uint8 uchars)
+
+{
+
+    uint8 status,uint8_ctr;
+
+    
+
+     gpio_set_value(CSN, 0) ; //SPI使能 
+
+
+
+    ndelay(60);
+
+    status = SPI_RW(reg); 
+
+    for(uint8_ctr=0; uint8_ctr<uchars; uint8_ctr++) //
+
+
+
+    {
+
+        SPI_RW(*pBuf++);
+
+        ndelay(20);
+
+    }
+
+    gpio_set_value(CSN, 1); //关闭SPI
+
+
+
+    ndelay(60);
+
+    return(status); // 
+
+
+
+}
+
+
+
+
+
+//函数：void SetRX_Mode(void)
+
+
+
+//功能：数据接收配置 
+
+
+
+void SetRX_Mode(void)
+
+{
+
+
+
+    gpio_set_value(CE, 0);
+
+    ndelay(60);
+
+    
+
+    SPI_Write_Buf(WRITE_REG + RX_ADDR_P0, RX_ADDRESS, RX_ADR_WIDTH); // 写接收端地址
+
+
+
+    SPI_RW_Reg(WRITE_REG + EN_AA, 0x01); // 频道0自动 ACK应答允许 
+
+
+
+    SPI_RW_Reg(WRITE_REG + EN_RXADDR, 0x01); // 允许接收地址只有频道0，如果需要多频道可以参考Page21 
+
+
+
+    SPI_RW_Reg(WRITE_REG + RF_CH, 5); // 设置信道工作为2.4GHZ，收发必须一致
+
+
+
+    SPI_RW_Reg(WRITE_REG + RX_PW_P0, RX_PLOAD_WIDTH); //设置接收数据长度，本次设置为32字节
+
+
+
+    SPI_RW_Reg(WRITE_REG + RF_SETUP, 0x09); //设置发射速率为1MHZ，发射功率为最大值0dB
+
+    
+
+    SPI_RW_Reg(WRITE_REG + CONFIG, 0x0f); // IRQ收发完成中断响应，16位CRC ，主接收
+
+
+
+    gpio_set_value(CE, 1);
+
+    udelay(130);
+
+}
+
+
+
+ 
+
+
+
+//函数：unsigned char nRF24L01_RxPacket(unsigned char* rx_buf)
+
+
+
+//功能：数据读取后放如rx_buf接收缓冲区中
+
+
+
+unsigned char nRF24L01_RxPacket(unsigned char* rx_buf)
+
+{
+
+    unsigned char revale=0;
+
+    int i;
+
+    sta=SPI_Read(STATUS); // 读取状态寄存其来判断数据接收状况
+
+
+
+    if(sta & (1<<RX_DR)) // 判断是否接收到数据
+
+
+
+    {
+
+        gpio_set_value(CE, 0); //SPI使能
+
+
+
+        udelay(50);
+
+
+
+        SPI_Read_Buf(RD_RX_PLOAD,rx_buf,TX_PLOAD_WIDTH);// read receive payload from RX_FIFO buffer
+
+
+
+        revale =1; //读取数据完成标志
+
+
+
+    }
+
+    SPI_RW_Reg(WRITE_REG+STATUS,sta); //接收到数据后RX_DR,TX_DS,MAX_PT都置高为1，通过写1来清楚中断标志
+
+    if(revale)  
+
+    {
+
+       for(i=1;i<32;i++)
+
+       printk("Buff%d=%d\n",i,rx_buf[i]);
+
+       printk("read ok!!!");
+
+    }
+
+   
+
+    return revale;
+
+}
+
+
+
+
+
+//函数：void nRF24L01_TxPacket(unsigned char * tx_buf)
+
+
+
+//功能：发送 tx_buf中数据
+
+
+
+void nRF24L01_TxPacket(unsigned char * tx_buf)
+
+{
+
+    gpio_set_value(CE, 0); //StandBy I模式 
+
+
+
+    ndelay(60);
+
+    SPI_Write_Buf(WRITE_REG + TX_ADDR, TX_ADDRESS, TX_ADR_WIDTH); // 写本地地址 
+
+
+
+    SPI_Write_Buf(WRITE_REG + RX_ADDR_P0, TX_ADDRESS, TX_ADR_WIDTH); // 装载接收端地址
+
+
+
+    SPI_Write_Buf(WR_TX_PLOAD, tx_buf, TX_PLOAD_WIDTH); // 装载数据 
+
+
+
+    SPI_RW_Reg(WRITE_REG+EN_AA,0x01);  
+
+    
+
+    SPI_RW_Reg(WRITE_REG+EN_RXADDR,0x01); 
+
+  
+
+    SPI_RW_Reg(WRITE_REG+SETUP_RETR,0x1a);
+
+
+
+    SPI_RW_Reg(WRITE_REG+RF_CH,5);      
+
+ 
+
+    SPI_RW_Reg(WRITE_REG+RF_SETUP,0x09);  
+
+ 
+
+    SPI_RW_Reg(WRITE_REG+CONFIG,0x0e);   
+
+    gpio_set_value(CE, 1); //置高CE，激发数据发送
+
+    
+
+    udelay(10);
+
+}
+
+
+
+
+
+
+
+	
+
+//文件的写函数
+
+
+
+static ssize_t nrf24l01_write(struct file *filp, const char *buffer,
+
+             size_t count, loff_t *ppos)
+
+{
+
+    if( copy_from_user( &TxBuf, buffer, count )); //从内核空间复制到用户空间
+
+
+
+    nRF24L01_TxPacket(TxBuf);
+
+    SPI_RW_Reg(WRITE_REG+STATUS,0XFF); 
+
+    printk("write OK! \n");
+
+    return(10);
+
+}
+
+
+
+//文件的读函数
+
+
+
+static ssize_t nrf24l01_read(struct file *filp, char *buffer,
+
+              size_t count, loff_t *ppos)
+
+{
+
+    SetRX_Mode();
+
+    
+
+   // while(gpio_irq_flag && copy_to_user(buffer,RxBuf,sizeof(RxBuf)));
+
+    //if(gpio_irq_flag) gpio_irq_flag=0;
+
+    //printk("read ok\n");
+
+    nRF24L01_RxPacket(buffer);
+
+    SPI_RW_Reg(WRITE_REG+STATUS,0XFF); 
+
+    printk("read finished!!");
+
+    return (10);
+
+}
+
+
+
+uint8 irq_num;
+
+static int nrf24l01_open(struct inode *node, struct file *file)
+
+{
+
+	  uint8 flag = 0;
+
+	  uint8 err_request;
+
+          uint8 err;
+
+          
+
+	  static struct gpio nrf24l01_gpios[]={
+
+		  {CSN,GPIOF_OUT_INIT_LOW,"csn"},
+
+		  {MOSI,GPIOF_OUT_INIT_LOW,"mosi"},
+
+		  {IRQ,GPIOF_IN,"irq"},
+
+		  {MISO,GPIOF_IN,"miso"},
+
+		  {SCK,GPIOF_OUT_INIT_LOW,"sck"},
+
+		  {CE,GPIOF_OUT_INIT_LOW,"ce"},
+
+	  };
+
+
+
+	  err_request=gpio_request_array(nrf24l01_gpios,ARRAY_SIZE(nrf24l01_gpios));
+
+
+
+	  if(err_request)
+
+	  {
+
+	    printk("Error:cannot request nrf24l01_gpios.\n");
+
+	  }
+
+
+
+	  flag = init_NRF24L01();
+
+         
+
+	  mdelay(100);
+
+          /*
+
+          irq_num = gpio_to_irq(IRQ);
+
+          err=request_irq(irq_num,Handler,IRQF_TRIGGER_FALLING,"gpio_irq",1);
+
+          
+
+
+
+          if(err)
+
+          {
+
+             disable_irq(irq_num);
+
+             free_irq(irq_num,1);
+
+             return -EBUSY;
+
+          }else printk("request_irq success !\n");
+
+          */
+
+          
+
+	  if(flag == 0)
+
+	    {
+
+	      printk("uable to open device!\n");
+
+	      return -1;
+
+	    }
+
+	  else
+
+	   {
+
+	      printk("device opened !\n");
+
+	      return 0;
+
+	   }
+
+           /*
+
+          while(1)
+
+          { 
+
+               ssleep(1);
+
+               gpio_set_value(CE, 0);
+
+               printk("CE=%d\n",gpio_get_value(CE));
+
+               ssleep(1);
+
+               gpio_set_value(CSN, 0);
+
+               printk("CSN=%d\n",gpio_get_value(CSN));
+
+               ssleep(1);
+
+               gpio_set_value(MOSI, 0);
+
+               printk("MOSI=%d\n",gpio_get_value(MOSI));
+
+               ssleep(1);
+
+               gpio_set_value(SCK, 0);
+
+               printk("SCK=%d\n",gpio_get_value(SCK));
+
+               ssleep(1);
+
+               printk("MISO=%d\n",gpio_get_value(MISO));
+
+               ssleep(1);
+
+
+
+
+
+               gpio_set_value(CE, 1);
+
+               printk("CE=%d\n",gpio_get_value(CE));
+
+               ssleep(1);
+
+               gpio_set_value(CSN, 1);
+
+               printk("CSN=%d\n",gpio_get_value(CSN));
+
+
+
+               ssleep(1);
+
+               gpio_set_value(MOSI, 1);
+
+               printk("MOSI=%d\n",gpio_get_value(MOSI));
+
+               ssleep(1);
+
+               gpio_set_value(SCK, 1);
+
+               printk("SCK=%d\n",gpio_get_value(SCK));
+
+               ssleep(1);
+
+               printk("MISO=%d\n",gpio_get_value(MISO));
+
+               ssleep(1);
+
+           }
+
+           */
+
+}
+
+
+
+static int nrf24l01_release(struct inode *node, struct file *file)
+
+{
+
+
+
+  gpio_free(CSN);
+
+  gpio_free(MOSI);
+
+  gpio_free(IRQ);
+
+  gpio_free(MISO);
+
+  gpio_free(SCK);
+
+  gpio_free(CE);
+
+  //disable_irq(irq_num);
+
+  //free_irq(irq_num,1);
+
+  printk(DEVICE_NAME " released !\n");
+
+  return 0;
+
+}
+
+
+
+static struct file_operations nrf24l01_fops = {
+
+	  .owner = THIS_MODULE,
+
+	  .open = nrf24l01_open,
+
+	  .write = nrf24l01_write,
+
+	  .read = nrf24l01_read,
+
+	  .release = nrf24l01_release,
+
+};
+
+int major;
+
+static int __init nrf24l01_init(void)
+
+{
+
+    
+
+
+
+    printk("Initial driver for NRF24L01......................\n");
+
+	
+
+    major = register_chrdev(0, DEVICE_NAME, &nrf24l01_fops); //注册，告诉内核
+
+		
+
+    mdelay(10);
+
+    spi_class = class_create(THIS_MODULE, DEVICE_NAME);    //自动创建设备节点
+
+	
+
+    spi_class_dev= device_create(spi_class, NULL, MKDEV(major, 0), NULL, "nrf24l01"); 
+
+
+
+
+
+    if (major < 0)
+
+    {
+
+        printk(DEVICE_NAME " can't register major number\n");
+
+        return major;
+
+
+
+    }
+
+    else
+
+    {
+
+        printk(DEVICE_NAME " register success\n");
+
+        return 0;
+
+    }
+
+	
+
+
+
+	
+
+}
+
+
+
+static void __exit nrf24l01_exit(void)
+
+{
+
+    unregister_chrdev(major, DEVICE_NAME);
+
+    device_unregister(spi_class_dev);
+
+    class_destroy(spi_class);
+
+    printk("NRF24L01 unregister success \n");
+
+}
+
+
+
+
+
+module_init(nrf24l01_init);
+
+module_exit(nrf24l01_exit);
+
+MODULE_AUTHOR("wpf");
+
+MODULE_DESCRIPTION("nrf24l01 driver");
+
+MODULE_LICENSE("GPL");
